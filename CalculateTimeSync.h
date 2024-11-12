@@ -1,3 +1,6 @@
+#include <TimeLib.h> 
+#include <SmallRTC.h>
+
 RTC_DATA_ATTR int MyTimeDriftWatchFace; // Watchface ID #.
 RTC_DATA_ATTR int32_t lastTimeDrift = 0;
 const int max_samples = 144; // Store drift samples for the last 24 hours
@@ -28,7 +31,6 @@ public:
     {
         if (StyleID == MyTimeDriftWatchFace)
         {
-            ResetWatchFace();
         }
     };
 
@@ -56,9 +58,13 @@ public:
             display.setTextColor(GxEPD_BLACK);
             display.setCursor(0, 20); // Start from the top
 
+            tmElements_t readTime;
+            SRTC.read(readTime);
+            time_t currentTime = makeTime(readTime);
+
             // Display current time
             display.print("Now: ");
-            display.println(now());
+            display.println(currentTime);
 
             display.print("Last Check Time: ");
             display.println(lastNTPCheck);
@@ -98,26 +104,28 @@ public:
         }
 
         log_e("Checking time drift...");
-        time_t queryNow;
+        tmElements_t queryNow;
         if (QueryNTPTime(queryNow))
         {
             log_e("Time drift check successful.");
-            if (queryNow != 0)
+            tmElements_t readTime;
+            SRTC.read(readTime);
+            time_t currentTime = makeTime(readTime);
+            time_t queryNowTime = makeTime(queryNow);
+            int32_t drift = currentTime - queryNowTime;
+            lastTimeDrift += drift;
+            for (int i = max_samples -1; i > 0; i--)
             {
-                int32_t drift = now() - queryNow;
-                lastTimeDrift += drift;
-                for (int i = max_samples -1; i > 0; i--)
-                {
-                    driftSamples[i] = driftSamples[i - 1];
-                }
-                driftSamples[0] = drift;
-                if (sampleCount < max_samples)
-                {
-                    sampleCount++;
-                }
-                log_e("Time Drift: %d", drift);
+                driftSamples[i] = driftSamples[i - 1];
             }
-            lastNTPCheck = queryNow;
+            driftSamples[0] = drift;
+            if (sampleCount < max_samples)
+            {
+                sampleCount++;
+            }
+            log_e("Time Drift: %d", drift);
+
+            lastNTPCheck = queryNowTime;
             UpdateScreen();
         }
         else
@@ -130,11 +138,11 @@ public:
     {
         if (SwitchNumber == 2)
         {
-            time_t queryNow;
+            tmElements_t queryNow;
             if (QueryNTPTime(queryNow))
             {
                 // Force NTP sync and update internal clock
-                setTime(queryNow);
+                SRTC.set(queryNow);
                 Haptic = true;
                 Refresh = true;
                 log_e("Internal clock updated with NTP time: %ld", queryNow);
@@ -148,19 +156,22 @@ public:
         else if (SwitchNumber == 3)
         {
             ResetWatchFace();
+            Haptic = true;
+            Refresh = true;
+            log_e("Watchface reset.");
+            return true;
         }
         else if (SwitchNumber == 4)
         {
-            time_t queryNow;
+            tmElements_t queryNow;
             // Get the current time from the NTP server
             if (QueryNTPTime(queryNow))
             {
-                if (queryNow != 0)
-                {
-                    int32_t drift = now() - queryNow;
-                    testSyncDrift = drift;
-                    log_e("Test Sync Drift: %d", drift);
-                }
+                time_t queryNowTime = makeTime(queryNow);
+                int32_t drift = millis() - queryNowTime;
+                testSyncDrift = drift;
+                log_e("Test Sync Drift: %d", drift);
+
                 Haptic = true;
                 Refresh = true;
                 return true;
@@ -171,7 +182,7 @@ public:
     }
 
 private:
-    bool QueryNTPTime(time_t &result)
+    bool QueryNTPTime(tmElements_t &result)
     {
         log_e("Starting NTP time query...");
         if (WiFi.status() != WL_CONNECTED)
@@ -199,9 +210,9 @@ private:
         {
             if (SNTP.Query())
             {
-                result = SNTP.Results;
+                result = SNTP.tmResults;
                 success = true;
-                return result;
+                return false;
             }
         }
 
