@@ -167,8 +167,11 @@ public:
             // Get the current time from the NTP server
             if (QueryNTPTime(queryNow))
             {
+                tmElements_t readTime;
+                SRTC.read(readTime);
+                time_t currentTime = makeTime(readTime);
                 time_t queryNowTime = makeTime(queryNow);
-                int32_t drift = millis() - queryNowTime;
+                int32_t drift = currentTime - queryNowTime;
                 testSyncDrift = drift;
                 log_e("Test Sync Drift: %d", drift);
 
