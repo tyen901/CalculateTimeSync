@@ -212,7 +212,6 @@ private:
             {
                 result = SNTP.tmResults;
                 success = true;
-                return false;
             }
         }
 
