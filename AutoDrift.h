@@ -1,12 +1,12 @@
-#include <TimeLib.h> 
+#include <TimeLib.h>
 #include <SmallRTC.h>
 
-RTC_DATA_ATTR int MyAutoDriftWatchFace; // Watchface ID #.
-RTC_DATA_ATTR int ad_minuteStep = 0;             // Number of samples stored
-RTC_DATA_ATTR int32_t ad_totalDrift = 0; // Total drift accumulated over 10 minutes
-RTC_DATA_ATTR bool ad_autosync = false; // Flag to control automatic syncing
-RTC_DATA_ATTR int32_t ad_driftSamples[6] = {0}; // Store drift samples
-RTC_DATA_ATTR int ad_driftSampleActiveIndex = 0; // Index for storing drift samples
+RTC_DATA_ATTR int MyAutoDriftWatchFace;                // Watchface ID #.
+RTC_DATA_ATTR int ad_minuteStep = 0;                   // Number of samples stored
+RTC_DATA_ATTR bool ad_autosync = false;                // Flag to control automatic syncing
+RTC_DATA_ATTR int32_t ad_driftSamples[6] = {0};        // Store drift samples
+RTC_DATA_ATTR int ad_driftSampleActiveIndex = 0;       // Index for storing drift samples
+RTC_DATA_ATTR int32_t ad_minuteDriftSamples[10] = {0}; // Store drift samples for each minute
 
 class GSRWatchFaceAutoDrift : public WatchyGSR
 {
@@ -36,9 +36,13 @@ public:
     {
         ad_autosync = false;
         ad_minuteStep = 0;
-        ad_totalDrift = 0;
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 6; i++)
+        {
             ad_driftSamples[i] = 0;
+        }
+        for (int i = 0; i < 10; i++)
+        {
+            ad_minuteDriftSamples[i] = 0;
         }
         ad_driftSampleActiveIndex = 0;
     }
@@ -68,13 +72,47 @@ public:
 
             // Display current calculated drift over 10 minutes
             display.print("Current Drift: ");
-            display.println(ad_totalDrift / (ad_minuteStep > 0 ? ad_minuteStep : 1));
+            int32_t totalDrift = 0;
+            for (int i = 0; i < ad_minuteStep; i++)
+            {
+                totalDrift += ad_minuteDriftSamples[i];
+            }
+            display.println(totalDrift / (ad_minuteStep > 0 ? ad_minuteStep : 1));
+
+            // Display minute drift samples
+            display.print("Minute Drift: ");
+            display.println();
+            for (int i = 0; i < 10; i++)
+            {
+                if (ad_minuteDriftSamples[i] == 0 && i >= ad_minuteStep)
+                {
+                    display.print("-");
+                }
+                else
+                {
+                    display.print(ad_minuteDriftSamples[i]);
+                }
+                if (i < 9)
+                {
+                    display.print(", ");
+                }
+            }
+            display.println();
 
             // Display drift samples
-            display.print("Drift Samples: ");
-            for (int i = 0; i < 6; i++) {
-                display.print(ad_driftSamples[i]);
-                if (i < 5) {
+            display.print("Stored Samples: ");
+            for (int i = 0; i < 6; i++)
+            {
+                if (ad_driftSamples[i] == 0 && i >= ad_driftSampleActiveIndex)
+                {
+                    display.print("-");
+                }
+                else
+                {
+                    display.print(ad_driftSamples[i]);
+                }
+                if (i < 5)
+                {
                     display.print(", ");
                 }
             }
@@ -84,13 +122,15 @@ public:
 
     void InsertOnMinute()
     {
-        if (!ad_autosync) {
+        if (!ad_autosync)
+        {
             return;
         }
 
         log_e("Checking time drift...");
         tmElements_t readTime, ntpTime;
-        if (!QueryNTPTime(ntpTime)) {
+        if (!QueryNTPTime(ntpTime))
+        {
             log_e("Failed to query NTP time.");
             return;
         }
@@ -100,28 +140,40 @@ public:
         time_t ntpCurrentTime = makeTime(ntpTime);
 
         // If readTime is less than 10000, the RTC is not set
-        if (currentTime < 10000) {
+        if (currentTime < 10000)
+        {
             log_e("RTC not set. Skipping drift calculation.");
             SRTC.set(ntpTime);
             return;
         }
 
-        if (ad_minuteStep == 0) {
+        int32_t minuteDrift = currentTime - ntpCurrentTime;
+        ad_minuteDriftSamples[ad_minuteStep] = minuteDrift; // Store drift for each minute
+
+        if (ad_minuteStep == 0)
+        {
             SRTC.beginDrift(readTime, true); // Start drift calculation
-        } else if (ad_minuteStep < 10) {
-            SRTC.endDrift(ntpTime, true); // End drift calculation and apply correction using ntpTime
-            ad_totalDrift += currentTime - ntpCurrentTime; // Accumulate drift for debugging
+        }
+        else if (ad_minuteStep < 10)
+        {
+            SRTC.endDrift(ntpTime, true);    // End drift calculation and apply correction using ntpTime
             SRTC.beginDrift(readTime, true); // Restart drift calculation
-        } else {
-            int32_t avgDrift = ad_totalDrift / 10; // Calculate average drift
+        }
+        else
+        {
+            int32_t totalDrift = 0;
+            for (int i = 0; i < 10; i++)
+            {
+                totalDrift += ad_minuteDriftSamples[i];
+            }
+            int32_t avgDrift = totalDrift / 10; // Calculate average drift
             log_e("Average Drift over 10 minutes: %d", avgDrift);
 
             // Store the average drift in the drift samples
             ad_driftSamples[ad_driftSampleActiveIndex] = avgDrift;
             ad_driftSampleActiveIndex = (ad_driftSampleActiveIndex + 1) % 6; // Update the index for storing drift samples
 
-            ad_totalDrift = 0; // Reset total drift
-            ad_minuteStep = 0; // Reset sample count
+            ad_minuteStep = 0;               // Reset sample count
             SRTC.beginDrift(readTime, true); // Restart drift calculation
         }
 
@@ -146,7 +198,8 @@ public:
 
             log_e("Setting current time");
             tmElements_t ntpTime;
-            if (!QueryNTPTime(ntpTime)) {
+            if (!QueryNTPTime(ntpTime))
+            {
                 log_e("Failed to query NTP time.");
                 return false;
             }
@@ -160,7 +213,6 @@ public:
         }
         else if (SwitchNumber == 4)
         {
-
         }
 
         return false;
