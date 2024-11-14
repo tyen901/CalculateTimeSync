@@ -2,11 +2,15 @@
 #include <SmallRTC.h>
 
 RTC_DATA_ATTR int MyAutoDriftWatchFace;             // Watchface ID #.
-RTC_DATA_ATTR int ad_driftSampleStep = 0;           // Number of samples stored
 RTC_DATA_ATTR bool ad_autosync = false;             // Flag to control automatic syncing
-RTC_DATA_ATTR int32_t ad_driftSamples[10] = {0};    // Store drift samples
-RTC_DATA_ATTR int ad_driftSetSampleActiveIndex = 0; // Index for storing drift samples
-RTC_DATA_ATTR int32_t ad_driftSetSamples[10] = {0}; // Store drift samples for each minute
+
+RTC_DATA_ATTR int ad_driftSampleStep = 0;           // Number of samples stored
+RTC_DATA_ATTR int32_t ad_internalDriftSamples[10] = {0}; // Store internal drift samples
+RTC_DATA_ATTR int32_t ad_chipDriftSamples[10] = {0};     // Store chip drift samples
+
+RTC_DATA_ATTR int ad_currentSetIndex = 0;                    // Index of the active drift set
+RTC_DATA_ATTR int32_t ad_internalDriftSetSamples[10] = {0}; // Store internal drift samples
+RTC_DATA_ATTR int32_t ad_chipDriftSetSamples[10] = {0};     // Store chip drift samples
 
 class GSRWatchFaceAutoDrift : public WatchyGSR
 {
@@ -35,17 +39,76 @@ public:
     void FullReset()
     {
         ad_autosync = false;
-        for (int i = 0; i < 10; i++)
-        {
-            ad_driftSamples[i] = 0;
-        }
         ad_driftSampleStep = 0;
+        ad_currentSetIndex = 0;
 
         for (int i = 0; i < 10; i++)
         {
-            ad_driftSetSamples[i] = 0;
+            ad_internalDriftSamples[i] = 0;
+            ad_chipDriftSamples[i] = 0;
+            ad_internalDriftSetSamples[i] = 0;
+            ad_chipDriftSetSamples[i] = 0;
         }
-        ad_driftSetSampleActiveIndex = 0;
+    }
+
+    void DisplaySamples(
+        String inTitle,
+        int32_t* inSamples,
+        int32_t* inSetSamples,
+        int inSampleCount
+        )
+    {
+        // Header
+        display.print(inTitle);
+        display.println();
+
+        display.print("Average Drift: ");
+        display.println();
+
+        int32_t totalDrift = 0;
+        for (int i = 0; i < 10; i++)
+        {
+            totalDrift += inSamples[i];
+        }
+        display.println(totalDrift / (inSampleCount > 0 ? inSampleCount : 1));
+
+        display.print("Samples " + inTitle);
+        display.println();
+        for (int i = 0; i < 10; i++)
+        {
+            if (inSamples[i] != 0)
+            {
+                display.print(inSamples[i]);
+            }
+            else
+            {
+                display.print("-");
+            }
+            if (i < 9)
+            {
+                display.print(", ");
+            }
+        }
+        display.println();
+
+        display.print("Set Samples " + inTitle);
+        display.println();
+        for (int i = 0; i < 10; i++)
+        {
+            if (inSetSamples[i] != 0)
+            {
+                display.print(inSetSamples[i]);
+            }
+            else
+            {
+                display.print("-");
+            }
+            if (i < 9)
+            {
+                display.print(", ");
+            }
+        }
+        display.println();
     }
 
     void InsertDrawWatchStyle(uint8_t StyleID)
@@ -71,54 +134,23 @@ public:
             display.print("Auto Sync: ");
             display.println(ad_autosync ? "Enabled" : "Disabled");
 
-            // Display current calculated drift over 10 minutes
-            display.print("Current Drift: ");
-            int32_t totalDrift = 0;
-            for (int i = 0; i < ad_driftSampleStep; i++)
-            {
-                totalDrift += ad_driftSamples[i];
-            }
-            display.println(totalDrift / (ad_driftSampleStep > 0 ? ad_driftSampleStep : 1));
-
-            // Display minute drift samples
-            display.print("Minute Drift: ");
-            display.println();
-            for (int i = 0; i < 10; i++)
-            {
-                if (ad_driftSamples[i] == 0 && i >= ad_driftSampleStep)
-                {
-                    display.print("-");
-                }
-                else
-                {
-                    display.print(ad_driftSamples[i]);
-                }
-                if (i < 9)
-                {
-                    display.print(", ");
-                }
-            }
             display.println();
 
-            // Display drift samples
-            display.print("Set Drift: ");
+            DisplaySamples(
+                "Internal",
+                ad_internalDriftSamples,
+                ad_internalDriftSetSamples,
+                ad_driftSampleStep
+            );
+
             display.println();
-            for (int i = 0; i < 10; i++)
-            {
-                if (ad_driftSetSamples[i] == 0 && i >= ad_driftSetSampleActiveIndex)
-                {
-                    display.print("-");
-                }
-                else
-                {
-                    display.print(ad_driftSetSamples[i]);
-                }
-                if (i < 9)
-                {
-                    display.print(", ");
-                }
-            }
-            display.println();
+
+            DisplaySamples(
+                "Chip",
+                ad_chipDriftSamples,
+                ad_chipDriftSetSamples,
+                ad_driftSampleStep
+            );
         }
     };
 
@@ -130,36 +162,37 @@ public:
         }
 
         log_e("Checking time drift...");
-        tmElements_t readTime, ntpTime;
+        tmElements_t internalTime, chipTime, ntpTime;
         if (!QueryNTPTime(ntpTime))
         {
             log_e("Failed to query NTP time.");
             return;
         }
 
-        SRTC.read(readTime);
-        time_t currentTime = makeTime(readTime);
+        SRTC.read(internalTime, true);
+        SRTC.read(chipTime, false);
         time_t ntpCurrentTime = makeTime(ntpTime);
+        time_t currentInternalTime = makeTime(internalTime);
+        time_t currentChipTime = makeTime(chipTime);
 
-        // If readTime is less than 10000, the RTC is not set
-        if (currentTime < 10000)
+        // If internalTime is less than 10000, the RTC is not set
+        if (currentInternalTime < 10000)
         {
-            log_e("RTC not set. Skipping drift calculation.");
-            SRTC.set(ntpTime);
+            SRTC.set(ntpTime, false, false);
+            SRTC.set(ntpTime, false, true);
             return;
         }
 
-        if (ad_driftSampleStep >= 10)
-        {
-            ad_driftSampleStep = 0;
-        }
+        int32_t internalDrift = currentInternalTime - ntpCurrentTime;
+        int32_t chipDrift = currentChipTime - ntpCurrentTime;
 
-        int32_t minuteDrift = currentTime - ntpCurrentTime;
-        ad_driftSamples[ad_driftSampleStep] = minuteDrift; // Store drift for each minute
+        ad_internalDriftSamples[ad_driftSampleStep] = internalDrift; // Store internal drift for each minute
+        ad_chipDriftSamples[ad_driftSampleStep] = chipDrift;         // Store chip drift for each minute
 
         if (ad_driftSampleStep == 0)
         {
-            SRTC.beginDrift(readTime, true); // Start drift calculation
+            // Start drift calculation
+            SRTC.beginDrift(internalTime, true); 
         }
         else if (ad_driftSampleStep < 10)
         {
@@ -167,29 +200,46 @@ public:
         }
         else
         {
-            SRTC.endDrift(ntpTime, true); // End drift calculation and apply correction using ntpTime
+            // End drift calculation and apply correction using ntpTime
+            SRTC.endDrift(ntpTime, true);
+            SRTC.endDrift(ntpTime, false);
 
-            int32_t totalDrift = 0;
+            int32_t totalInternalDrift = 0;
+            int32_t totalChipDrift = 0;
             for (int i = 0; i < 10; i++)
             {
-                totalDrift += ad_driftSamples[i];
+                totalInternalDrift += ad_internalDriftSamples[i];
+                totalChipDrift += ad_chipDriftSamples[i];
             }
-            int32_t avgDrift = totalDrift / 10; // Calculate average drift
-            log_e("Average Drift over 10 minutes: %d", avgDrift);
-
-            // Store the average drift in the drift samples
-            ad_driftSetSamples[ad_driftSetSampleActiveIndex] = avgDrift;
-            ad_driftSetSampleActiveIndex = (ad_driftSetSampleActiveIndex + 1) % 10; // Update the index for storing drift samples
+            int32_t avgInternalDrift = totalInternalDrift / 10; // Calculate average internal drift
+            int32_t avgChipDrift = totalChipDrift / 10;         // Calculate average chip drift
 
             // Clear the drift samples
             for (int i = 0; i < 10; i++)
             {
-                ad_driftSamples[i] = 0;
+                ad_internalDriftSamples[i] = 0;
+                ad_chipDriftSamples[i] = 0;
+            }
+            ad_driftSampleStep = 0;
+
+            // Store the average internal and chip drifts in the sets
+            ad_internalDriftSetSamples[ad_currentSetIndex] = avgInternalDrift;
+            ad_chipDriftSetSamples[ad_currentSetIndex] = avgChipDrift;
+
+            // Update the index of the active drift set
+            ad_currentSetIndex++;
+
+            // If the time goes beyond 10, we've done 10 hours of drift calculation and can stop
+            if (ad_currentSetIndex == 10)
+            {
+                ad_autosync = false;
+                log_e("Automatic syncing disabled.");
+                return;
             }
         }
 
         ad_driftSampleStep++;
-        lastNTPCheck = ntpCurrentTime;
+
         UpdateScreen();
     }
 
